@@ -1,0 +1,211 @@
+// public/play.js
+
+let socket = null;
+let currentRoomId = null;
+let myName = null;
+let myRole = 'guitar';
+let currentRoom = null;
+let lastState = null;
+
+const joinOverlay = document.getElementById('join-overlay');
+const joinBtn = document.getElementById('join-btn');
+const joinRoomInput = document.getElementById('join-room-id');
+const joinNameInput = document.getElementById('join-name');
+const joinRoleSelect = document.getElementById('join-role');
+
+const songTitleEl = document.getElementById('song-title');
+const songMetaEl = document.getElementById('song-meta');
+const roomLabelEl = document.getElementById('room-label');
+const roomPillEl = document.getElementById('room-pill');
+const userCountEl = document.getElementById('user-count');
+const playDotEl = document.getElementById('play-dot');
+
+const sectionNameEl = document.getElementById('section-name');
+const tempoValueEl = document.getElementById('tempo-value');
+const roleLabelEl = document.getElementById('role-label');
+
+const chartTitleEl = document.getElementById('chart-title');
+const chartSubtitleEl = document.getElementById('chart-subtitle');
+const chartContentEl = document.getElementById('chart-content');
+
+const btnPrev = document.getElementById('btn-prev');
+const btnPlay = document.getElementById('btn-play');
+const btnNext = document.getElementById('btn-next');
+const btnRestart = document.getElementById('btn-restart');
+
+const toastEl = document.getElementById('toast');
+
+// ---- Connexion à la session ----
+
+joinBtn.addEventListener('click', () => {
+  const roomId = (joinRoomInput.value || '').trim().toUpperCase() || 'DEMO';
+  const userName = (joinNameInput.value || '').trim() || 'Anonyme';
+  const role = joinRoleSelect.value || 'guitar';
+
+  currentRoomId = roomId;
+  myName = userName;
+  myRole = role;
+
+  // connexion socket
+  socket = io();
+
+  socket.on('connect', () => {
+    socket.emit('joinRoom', {
+      roomId: currentRoomId,
+      userName: myName,
+      role: myRole,
+      isMaster: false   // ici, tout le monde peut contrôler, on ignore réellement ce flag côté client
+    });
+  });
+
+  socket.on('roomState', (room) => {
+    const previousState = lastState ? { ...lastState } : null;
+    currentRoom = room;
+    lastState = { ...(room.state || {}) };
+    updateUIFromRoom();
+    if (previousState) {
+      announceChanges(previousState, room.state || {});
+    }
+  });
+
+  // On cache l'overlay
+  joinOverlay.style.display = 'none';
+});
+
+// ---- Mise à jour de l'interface ----
+
+function updateUIFromRoom() {
+  if (!currentRoom || !currentRoom.state) return;
+  const state = currentRoom.state;
+  const song = state.song || {};
+  const sections = song.sections || [];
+  const parts = song.parts || {};
+
+  // Titre / meta
+  songTitleEl.textContent = song.title || 'Morceau';
+  const artist = song.artist ? `par ${song.artist}` : '';
+  const bpm = state.bpm || song.bpm || 90;
+  songMetaEl.textContent = `${artist || 'Morceau de démo'} • ${bpm} BPM`;
+  roomLabelEl.textContent = currentRoomId || '–';
+
+  // Nombre de musiciens
+  const count = (currentRoom.users || []).length;
+  userCountEl.textContent = count <= 1 ? `${count} musicien` : `${count} musiciens`;
+
+  // Lecture / pause
+  if (state.isPlaying) {
+    playDotEl.classList.add('playing');
+    btnPlay.textContent = '⏸ Pause';
+  } else {
+    playDotEl.classList.remove('playing');
+    btnPlay.textContent = '▶ Lecture';
+  }
+
+  // Section actuelle
+  const idx = state.sectionIndex || 0;
+  const sec = sections[idx] || {};
+  sectionNameEl.textContent = sec.name || `Section ${idx + 1}`;
+  tempoValueEl.textContent = bpm.toString();
+
+  // Rôle / partition
+  roleLabelEl.textContent = formatRole(myRole);
+
+  const myPart = parts[myRole] || parts.generic || {
+    name: 'Partie',
+    text: 'Aucune partie spécifique définie pour ce rôle.'
+  };
+
+  chartTitleEl.textContent = myPart.name || 'Ta partition';
+  chartSubtitleEl.textContent = `Section : ${sec.name || `Section ${idx + 1}`}`;
+  chartContentEl.textContent = myPart.text || 'Pas de texte pour cette partie.';
+
+  // On essaie de remonter le scroll au début de la partition à chaque changement de section
+  chartContentEl.scrollTop = 0;
+}
+
+function formatRole(role) {
+  switch (role) {
+    case 'guitar': return 'Guitare';
+    case 'bass': return 'Basse';
+    case 'ukulele': return 'Ukulélé';
+    case 'vocal': return 'Chant';
+    case 'generic':
+    default: return 'Autre';
+  }
+}
+
+// ---- Transport : tout le monde peut envoyer des commandes ----
+
+function sendPatch(patch, actionLabel) {
+  if (!socket || !currentRoomId) return;
+  socket.emit('updateState', {
+    roomId: currentRoomId,
+    patch
+  });
+
+  // petite indication locale immédiate
+  if (actionLabel) {
+    showToast(`${actionLabel} (envoyé par toi)`);
+  }
+}
+
+btnPlay.addEventListener('click', () => {
+  if (!currentRoom || !currentRoom.state) return;
+  const nextState = !currentRoom.state.isPlaying;
+  sendPatch({ isPlaying: nextState }, nextState ? 'Lecture' : 'Pause');
+});
+
+btnNext.addEventListener('click', () => {
+  if (!currentRoom || !currentRoom.state) return;
+  const song = currentRoom.state.song || {};
+  const sections = song.sections || [];
+  if (!sections.length) return;
+  const currentIdx = currentRoom.state.sectionIndex || 0;
+  const nextIdx = (currentIdx + 1) % sections.length;
+  sendPatch({ sectionIndex: nextIdx, isPlaying: false }, 'Section suivante');
+});
+
+btnPrev.addEventListener('click', () => {
+  if (!currentRoom || !currentRoom.state) return;
+  const song = currentRoom.state.song || {};
+  const sections = song.sections || [];
+  if (!sections.length) return;
+  const currentIdx = currentRoom.state.sectionIndex || 0;
+  const prevIdx = (currentIdx - 1 + sections.length) % sections.length;
+  sendPatch({ sectionIndex: prevIdx, isPlaying: false }, 'Section précédente');
+});
+
+btnRestart.addEventListener('click', () => {
+  if (!currentRoom || !currentRoom.state) return;
+  sendPatch({ sectionIndex: 0, isPlaying: false }, 'Retour au début');
+});
+
+// ---- Toast / petites notifications ----
+
+let toastTimeout = null;
+
+function showToast(message) {
+  toastEl.textContent = message;
+  toastEl.style.display = 'block';
+  toastEl.style.opacity = '1';
+  if (toastTimeout) clearTimeout(toastTimeout);
+  toastTimeout = setTimeout(() => {
+    toastEl.style.opacity = '0';
+    setTimeout(() => {
+      toastEl.style.display = 'none';
+    }, 250);
+  }, 2000);
+}
+
+// Option : déduire quelques changements majeurs pour afficher un petit message
+function announceChanges(prev, next) {
+  if (!prev || !next) return;
+  if (prev.isPlaying !== next.isPlaying) {
+    // quelqu’un a appuyé sur play/pause
+    showToast(next.isPlaying ? 'Lecture démarrée' : 'Lecture mise en pause');
+  } else if ((prev.sectionIndex || 0) !== (next.sectionIndex || 0)) {
+    showToast('Changement de section');
+  } else if ((prev.bpm || 0) !== (next.bpm || 0)) {
+    showToast(`Tempo ajusté : ${next.bpm} BPM`);
+  }
+}
